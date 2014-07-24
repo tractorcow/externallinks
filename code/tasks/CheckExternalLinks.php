@@ -1,5 +1,8 @@
 <?php
 
+/**
+ * Runs external link checker
+ */
 class CheckExternalLinks extends BuildTask {
 	protected $title = 'Checking broken External links in the SiteTree';
 
@@ -7,69 +10,98 @@ class CheckExternalLinks extends BuildTask {
 
 	protected $enabled = true;
 
-	function run($request) {
-		// clear broken external link table
-		$table = 'BrokenExternalLinks';
-		if(method_exists(DB::getConn(), 'clearTable')) DB::getConn()->clearTable($table);
-		else DB::query("TRUNCATE \"$table\"");
-		$pages = SiteTree::get();
-		foreach ($pages as $page) {
-			$htmlValue = Injector::inst()->create('HTMLValue', $page->Content);
+	public function run($request) {
+		// If queuedjobs is installed, run as a queued service instead
+		if(class_exists('QueuedJobService')) {
+			Debug::message('Adding service to queuedjobs');
+			singleton('CheckExternalLinksJob')->queueExecution();
+			return;
+		}
 
-			// Populate link tracking for internal links & links to asset files.
-			if($links = $htmlValue->getElementsByTagName('a')) foreach($links as $link) {
-				$href = Director::makeRelative($link->getAttribute('href'));
-				if ($href == 'admin/') continue;
+		// Generate a new run
+		Debug::message("Starting external link run");
+		$run = BrokenExternalLinksRun::create();
+		$run->write();
 
-				// ignore SiteTree and assets links as they will be caught by SiteTreeLinkTracking
-				if(preg_match('/\[sitetree_link,id=([0-9]+)\]/i', $href, $matches)) {
-					continue;
-				} else if(substr($href, 0, strlen(ASSETS_DIR) + 1) == ASSETS_DIR.'/') {
-					continue;
-				}
-				if($href && function_exists('curl_init')) {
-					$handle = curl_init($href);
-					curl_setopt($handle, CURLOPT_RETURNTRANSFER, TRUE);
-					$response = curl_exec($handle);
-					$httpCode = curl_getinfo($handle, CURLINFO_HTTP_CODE);  
-					curl_close($handle);
-					if (($httpCode < 200 || $httpCode > 302)
-						|| ($href == '' || $href[0] == '/'))
-					{
-						$brokenLink = new BrokenExternalLinks();			
-						$brokenLink->PageID = $page->ID;
-						$brokenLink->Link = $href;
-						$brokenLink->HTTPCode = $httpCode;
-						$brokenLink->write();
-
-						// TODO set the broken link class
-						/*
-						$class = $link->getAttribute('class');
-						$class = ($class) ? $class . 'ss-broken' : 'ss-broken';
-						$link->setAttribute('class', ($class ? "$class ss-broken" : 'ss-broken'));
-						*/
-
-						// use raw sql query to set broken link as calling the dataobject write
-						// method will reset the links if no broken internal links are found
-						$query = "UPDATE \"SiteTree\" SET \"HasBrokenLink\" = 1 ";	
-						$query .= "WHERE \"ID\" = " . (int)$page->ID;	
-						$result = DB::query($query);
-						if (!$result) {
-							// error updating hasBrokenLink
-						}
-
-					}
-				}
+		// Get all pages
+		try {
+			$pages = SiteTree::get();
+			foreach ($pages as $page) {
+				$this->checkPage($run, $page);
 			}
+		} catch(Exception $ex) {
+			$run->Status = 'Failed';
+			$run->write();
+			throw $ex;
 		}
 
-		// run this again if queued jobs exists and is a valid int
-		$queuedJob = Config::inst()->get('CheckExternalLinks', 'QueuedJob');
-		if (isset($queuedJob) && is_int($queuedJob) && class_exists('QueuedJobService')) {
-			$checkLinks = new CheckExternalLinksJob();
-			singleton('QueuedJobService')
-				->queueJob($checkLinks, date('Y-m-d H:i:s', time() + $queuedJob));
-		}
+		$run->Status = 'Finished';
+		$run->write();
 
+		Debug::message("Finished");
+	}
+
+	/**
+	 * Checks links in a single page
+	 *
+	 * @param BrokenExternalLinksRun $run
+	 * @param Page $page
+	 */
+	public function checkPage($run, $page) {
+		$htmlValue = Injector::inst()->create('HTMLValue', $page->Content);
+		$links = $htmlValue->getElementsByTagName('a');
+		if(empty($links)) return;
+
+		// Populate link tracking for internal links & links to asset files.
+		foreach($links as $link) {
+			$this->checkPageLink($run, $page, $link);
+		}
+	}
+
+	/**
+	 * Checks a single link on a page
+	 *
+	 * @param BrokenExternalLinksRun $run
+	 * @param Page $page
+	 * @param string $link
+	 */
+	public function checkPageLink($run, $page, $link) {
+		// Exclude internal urls
+		$href = Director::makeRelative($link->getAttribute('href'));
+		if(!preg_match('/^http/', $href)) return;
+
+		// CURL request this page
+		$handle = curl_init($href);
+		curl_setopt($handle, CURLOPT_RETURNTRANSFER, TRUE);
+		curl_exec($handle);
+		$httpCode = curl_getinfo($handle, CURLINFO_HTTP_CODE);
+		curl_close($handle);
+
+		// Check if valid code
+		if($httpCode >= 200 && $httpCode <= 302) return;
+
+		// Generate new report
+		$brokenLink = new BrokenExternalLinks();
+		$brokenLink->PageID = $page->ID;
+		$brokenLink->RunID = $run->ID;
+		$brokenLink->Link = $href;
+		$brokenLink->HTTPCode = $httpCode;
+		$brokenLink->write();
+
+		// TODO set the broken link class
+		/*
+		$class = $link->getAttribute('class');
+		$class = ($class) ? $class . 'ss-broken' : 'ss-broken';
+		$link->setAttribute('class', ($class ? "$class ss-broken" : 'ss-broken'));
+		*/
+
+		// use raw sql query to set broken link as calling the dataobject write
+		// method will reset the links if no broken internal links are found
+		$query = "UPDATE \"SiteTree\" SET \"HasBrokenLink\" = 1 ";
+		$query .= "WHERE \"ID\" = " . (int)$page->ID;
+		$result = DB::query($query);
+		if (!$result) {
+			// error updating hasBrokenLink
+		}
 	}
 }

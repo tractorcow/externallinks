@@ -8,7 +8,8 @@ class BrokenExternalLinks extends DataObject {
 	);
 
 	private static $has_one = array(
-		'Page' => 'Page'
+		'Page' => 'Page',
+		'Run' => 'BrokenExternalLinksRun'
 	);
 
 	public static $summary_fields = array(

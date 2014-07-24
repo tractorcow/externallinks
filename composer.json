@@ -9,9 +9,12 @@
 			"email": "kirk@silverstripe.com"
 		}
 	],
-	"require":
-	{
+	"require": {
+		"ext-curl": "*",
 		"silverstripe/framework": ">=3.0",
 		"silverstripe/cms": ">=3.0"
+	},
+	"suggest": {
+		"silverstripe/queuedjobs": "Allow external links to be run as a background task"
 	}
 }
